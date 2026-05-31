@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+node_modules/
+venv/
+.env
+data/cache/
+data/chat/
+data/conversations/
+.git/
+*.key
+*token*
+*secret*
