@@ -133,23 +133,27 @@ for cred in d['credential_pool']['deepseek']:
   gateway)
     case "${2:-status}" in
       start)
-        echo -e "${GREEN}🚀 启动 Agent Gateway...${NC}"
-        DEEPSEEK_KEY=$(python3 -c "import json;d=json.load(open('/home/admin/.hermes/auth.json'));print([c['access_token'] for c in d['credential_pool']['deepseek']][0])" 2>/dev/null)
-        cd "$PROJECT_DIR/../gateway"
-        export DEEPSEEK_API_KEY="$DEEPSEEK_KEY"
-        nohup $PYTHON gateway.py > /tmp/gateway.log 2>&1 &
+        sudo systemctl start agent-gateway
         sleep 2
-        curl -s http://localhost:8001/ >/dev/null 2>&1 && echo -e "${GREEN}✅ Gateway 启动成功 (端口 8001)${NC}" || echo -e "${RED}❌ 启动失败${NC}"
+        sudo systemctl status agent-gateway --no-pager | head -5
         ;;
       stop)
-        kill $(ss -tlnp | grep 8001 | grep -oP 'pid=\K[0-9]+') 2>/dev/null
+        sudo systemctl stop agent-gateway
         echo -e "${GREEN}✅ Gateway 已停止${NC}"
         ;;
+      restart)
+        sudo systemctl restart agent-gateway
+        sleep 2
+        sudo systemctl status agent-gateway --no-pager | head -5
+        ;;
       logs)
-        tail -30 /tmp/gateway.log 2>/dev/null || echo "无日志"
+        sudo journalctl -u agent-gateway -n 50 --no-pager
+        ;;
+      status)
+        sudo systemctl status agent-gateway --no-pager | head -15
         ;;
       *)
-        echo "用法: $0 gateway {start|stop|logs}"
+        echo "用法: $0 gateway {start|stop|restart|logs|status}"
         ;;
     esac
     ;;

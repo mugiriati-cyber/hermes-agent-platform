@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Gateway - Hermes ↔ AI 通信桥梁
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/hermes-platform/gateway
+Environment=DEEPSEEK_API_KEY=%d
+Environment=DEEPSEEK_BASE_URL=https://api.deepseek.com
+Environment=GATEWAY_TOKEN=hermes-trae-gateway-v1
+ExecStart=/home/admin/praison-env/bin/python /home/admin/hermes-platform/gateway/gateway.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
