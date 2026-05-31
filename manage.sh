@@ -126,8 +126,32 @@ for cred in d['credential_pool']['deepseek']:
     echo -e "🧬 进化学习次数: $EVO"
     
     # 内存
-    MEM=$(ps -o rss= -p $(cat "$PID_FILE" 2>/dev/null) 2>/dev/null | awk '{printf "%.0fMB", $1/1024}' || echo "N/A")
-    echo -e "💾 内存使用: $MEM"
+  health)
+    $0 _health_check
+    ;;
+    
+  gateway)
+    case "${2:-status}" in
+      start)
+        echo -e "${GREEN}🚀 启动 Agent Gateway...${NC}"
+        DEEPSEEK_KEY=$(python3 -c "import json;d=json.load(open('/home/admin/.hermes/auth.json'));print([c['access_token'] for c in d['credential_pool']['deepseek']][0])" 2>/dev/null)
+        cd "$PROJECT_DIR/../gateway"
+        export DEEPSEEK_API_KEY="$DEEPSEEK_KEY"
+        nohup $PYTHON gateway.py > /tmp/gateway.log 2>&1 &
+        sleep 2
+        curl -s http://localhost:8001/ >/dev/null 2>&1 && echo -e "${GREEN}✅ Gateway 启动成功 (端口 8001)${NC}" || echo -e "${RED}❌ 启动失败${NC}"
+        ;;
+      stop)
+        kill $(ss -tlnp | grep 8001 | grep -oP 'pid=\K[0-9]+') 2>/dev/null
+        echo -e "${GREEN}✅ Gateway 已停止${NC}"
+        ;;
+      logs)
+        tail -30 /tmp/gateway.log 2>/dev/null || echo "无日志"
+        ;;
+      *)
+        echo "用法: $0 gateway {start|stop|logs}"
+        ;;
+    esac
     ;;
     
   *)

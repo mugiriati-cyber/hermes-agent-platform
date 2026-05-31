@@ -1,0 +1,1 @@
+{"time": "2026-05-31T15:49:51.714906", "task_type": "analyze", "context_keys": ["error", "env"], "response_type": "answer", "response_preview": "当前错误是因为 fastapi 模块未安装。更关键的是，FastAPI 要求 Python 3.7 及以上版本，而环境中是 Python 3.6.8，无法直接安装最新版 FastAPI，即使安装老版本也可能不兼容或缺少功能。根本原因是 Python 版本过低。"}
