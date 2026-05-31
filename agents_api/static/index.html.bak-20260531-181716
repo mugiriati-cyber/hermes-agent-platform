@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hermes 智能体管理平台 v3.0</title>
+<link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <el-container class="app-container">
+    <!-- 侧边栏 -->
+    <el-aside width="220px" class="app-aside">
+      <div class="logo">
+        <el-icon :size="24"><Monitor /></el-icon>
+        <span class="logo-text">Hermes <small>v3.0</small></span>
+      </div>
+      <el-menu
+        :default-active="activeMenu"
+        @select="handleMenuSelect"
+        class="side-menu"
+      >
+        <el-menu-item index="dashboard">
+          <el-icon><Odometer /></el-icon>
+          <span>控制台</span>
+        </el-menu-item>
+        <el-menu-item index="agents">
+          <el-icon><UserFilled /></el-icon>
+          <span>智能体</span>
+        </el-menu-item>
+        <el-menu-item index="knowledge">
+          <el-icon><Collection /></el-icon>
+          <span>知识库</span>
+        </el-menu-item>
+        <el-menu-item index="cluster">
+          <el-icon><Connection /></el-icon>
+          <span>集群对话</span>
+        </el-menu-item>
+        <el-menu-item index="evolution">
+          <el-icon><TrendCharts /></el-icon>
+          <span>进化系统</span>
+        </el-menu-item>
+      </el-menu>
+      <div class="sidebar-footer">
+        <el-tag size="small" type="info" effect="dark">v3.0</el-tag>
+        <el-tag size="small" type="success" effect="dark">RAG</el-tag>
+        <el-tag size="small" type="" effect="dark" color="#7c3aed">deepseek-v4-pro</el-tag>
+      </div>
+    </el-aside>
+
+    <!-- 主区域 -->
+    <el-container>
+      <el-main class="app-main">
+
+        <!-- 控制台 -->
+        <div v-show="activeMenu === 'dashboard'" class="page">
+          <h2 class="page-title">📊 控制台</h2>
+          <el-row :gutter="20">
+            <el-col :span="6">
+              <el-card shadow="hover" class="stat-card">
+                <el-statistic title="智能体数量" :value="stats.agents_count" />
+              </el-card>
+            </el-col>
+            <el-col :span="6">
+              <el-card shadow="hover" class="stat-card">
+                <el-statistic title="知识库文档" :value="stats.knowledge_count" />
+              </el-card>
+            </el-col>
+            <el-col :span="6">
+              <el-card shadow="hover" class="stat-card">
+                <el-statistic title="累计学习次数" :value="stats.evolution_count" />
+              </el-card>
+            </el-col>
+            <el-col :span="6">
+              <el-card shadow="hover" class="stat-card">
+                <el-statistic title="技能数量" :value="stats.skills_count" />
+              </el-card>
+            </el-col>
+          </el-row>
+          <el-card class="mt-20">
+            <template #header><span>平台状态</span></template>
+            <el-descriptions :column="2" border>
+              <el-descriptions-item label="平台版本">3.0</el-descriptions-item>
+              <el-descriptions-item label="运行状态">
+                <el-tag type="success">运行中</el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="默认模型">deepseek-v4-pro</el-descriptions-item>
+              <el-descriptions-item label="思考模式">已启用</el-descriptions-item>
+              <el-descriptions-item label="RAG 知识库">已启用</el-descriptions-item>
+              <el-descriptions-item label="智能进化">已启用</el-descriptions-item>
+            </el-descriptions>
+          </el-card>
+        </div>
+
+        <!-- 智能体列表 -->
+        <div v-show="activeMenu === 'agents'" class="page">
+          <h2 class="page-title">🤖 智能体管理</h2>
+          <el-row :gutter="16">
+            <el-col :span="8" v-for="agent in agents" :key="agent.name">
+              <el-card shadow="hover" class="agent-card" @click="showAgentChat(agent)">
+                <template #header>
+                  <div class="agent-card-header">
+                    <span class="agent-name">{{ agent.name }}</span>
+                    <el-tag v-if="agent.reasoning" size="small" type="" color="#7c3aed">思考模式</el-tag>
+                  </div>
+                </template>
+                <div class="agent-role">{{ agent.role }}</div>
+                <div class="agent-desc">{{ agent.description }}</div>
+                <div class="agent-model">模型: {{ agent.model || 'deepseek-v4-pro' }}</div>
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <!-- 智能体对话弹窗 -->
+          <el-dialog v-model="agentChatVisible" :title="'💬 与 ' + chatAgent?.name + ' 对话'" width="700px" destroy-on-close>
+            <div class="agent-chat-area">
+              <div class="chat-messages" ref="agentChatMsgs">
+                <div v-for="(m, i) in agentChatHistory" :key="i" class="chat-msg" :class="m.role">
+                  <div class="chat-bubble" v-html="formatContent(m.content)"></div>
+                </div>
+                <div v-if="agentChatLoading" class="chat-msg assistant">
+                  <div class="chat-bubble typing">思考中…</div>
+                </div>
+              </div>
+            </div>
+            <template #footer>
+              <el-input v-model="agentChatInput" placeholder="输入消息..." @keyup.enter="sendAgentChat"
+                :disabled="agentChatLoading" clearable>
+                <template #append>
+                  <el-button @click="sendAgentChat" :disabled="agentChatLoading" :icon="Promotion">
+                    发送
+                  </el-button>
+                </template>
+              </el-input>
+            </template>
+          </el-dialog>
+        </div>
+
+        <!-- 知识库 -->
+        <div v-show="activeMenu === 'knowledge'" class="page">
+          <div class="page-header">
+            <h2 class="page-title">📚 知识库管理</h2>
+            <el-button type="primary" @click="showAddKbDialog">添加知识</el-button>
+          </div>
+
+          <el-card class="mt-20">
+            <template #header>
+              <div class="kb-search-bar">
+                <el-input v-model="kbSearchQuery" placeholder="搜索知识库..." clearable @keyup.enter="searchKnowledge">
+                  <template #prefix><el-icon><Search /></el-icon></template>
+                </el-input>
+                <el-button type="primary" @click="searchKnowledge">搜索</el-button>
+              </div>
+            </template>
+            <el-table :data="kbDisplayDocs" stripe v-loading="kbLoading" empty-text="暂无知识">
+              <el-table-column prop="id" label="ID" width="120" />
+              <el-table-column prop="content" label="内容" show-overflow-tooltip />
+              <el-table-column label="标签" width="180">
+                <template #default="{ row }">
+                  <el-tag v-for="tag in (row.tags || [])" :key="tag" size="small" class="mr-4">{{ tag }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="source" label="来源" width="120" />
+              <el-table-column prop="added_at" label="添加时间" width="180">
+                <template #default="{ row }">{{ row.added_at ? row.added_at.slice(0, 16) : '-' }}</template>
+              </el-table-column>
+            </el-table>
+            <div class="kb-footer">共 {{ totalKbDocs }} 条知识</div>
+          </el-card>
+
+          <!-- 搜索结果 -->
+          <el-card v-if="kbSearchResults !== null" class="mt-20">
+            <template #header><span>搜索结果 ({{ kbSearchResults.length }} 条)</span></template>
+            <div v-for="(r, i) in kbSearchResults" :key="i" class="kb-result-item">{{ r }}</div>
+          </el-card>
+
+          <!-- 添加知识弹窗 -->
+          <el-dialog v-model="addKbVisible" title="添加知识" width="500px">
+            <el-form :model="addKbForm" label-position="top">
+              <el-form-item label="内容">
+                <el-input v-model="addKbForm.content" type="textarea" :rows="4" placeholder="输入知识内容..." />
+              </el-form-item>
+              <el-form-item label="标签（逗号分隔）">
+                <el-input v-model="addKbForm.tagsStr" placeholder="如: hermes, agents" />
+              </el-form-item>
+              <el-form-item label="来源">
+                <el-input v-model="addKbForm.source" placeholder="可选" />
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="addKbVisible = false">取消</el-button>
+              <el-button type="primary" @click="addKnowledge" :loading="kbAdding">添加</el-button>
+            </template>
+          </el-dialog>
+        </div>
+
+        <!-- 集群对话 -->
+        <div v-show="activeMenu === 'cluster'" class="page">
+          <h2 class="page-title">💬 集群对话 <el-tag type="success" size="small">RAG 已启用</el-tag></h2>
+          <p class="page-desc">输入任务 → Orchestrator 分配 → 各智能体并行执行 + 知识库检索</p>
+
+          <el-card class="cluster-chat-card">
+            <div class="cluster-messages" ref="clusterMsgs">
+              <div v-if="clusterMessages.length === 0" class="empty-chat">
+                <el-empty description="输入任务开始集群对话" />
+              </div>
+              <div v-for="(m, i) in clusterMessages" :key="i" class="cluster-msg" :class="m.role">
+                <template v-if="m.role === 'user'">
+                  <div class="cluster-bubble user-bubble">{{ m.content }}</div>
+                </template>
+                <template v-else>
+                  <div class="cluster-bubble assistant-bubble">
+                    <div v-if="m.type === 'orchestration'" class="orchestration-header">
+                      <el-tag type="warning" size="small">🤖 总指挥</el-tag>
+                    </div>
+                    <div v-if="m.type === 'knowledge'" class="knowledge-header">
+                      <el-tag type="info" size="small">📚 知识库检索</el-tag>
+                    </div>
+                    <div v-if="m.type === 'agent'" class="agent-header">
+                      <el-tag size="small" color="#7c3aed">{{ m.agent }}</el-tag>
+                    </div>
+                    <div class="cluster-content" v-html="formatContent(m.content)"></div>
+                  </div>
+                </template>
+              </div>
+              <div v-if="clusterLoading" class="cluster-msg assistant">
+                <div class="cluster-bubble assistant-bubble typing">智能体集群思考中…</div>
+              </div>
+            </div>
+          </el-card>
+
+          <div class="cluster-input">
+            <el-input v-model="clusterInput" type="textarea" :rows="2" placeholder="输入任务..."
+              @keydown.enter.exact.prevent="sendClusterTask" :disabled="clusterLoading" />
+            <el-button type="primary" size="large" @click="sendClusterTask" :disabled="clusterLoading" :loading="clusterLoading">
+              发送任务
+            </el-button>
+          </div>
+        </div>
+
+        <!-- 进化系统 -->
+        <div v-show="activeMenu === 'evolution'" class="page">
+          <h2 class="page-title">🧬 智能进化系统</h2>
+
+          <el-row :gutter="20">
+            <el-col :span="8">
+              <el-card shadow="hover" class="stat-card">
+                <el-statistic title="累计学习次数" :value="evolutionStats.total_learned" />
+              </el-card>
+            </el-col>
+            <el-col :span="8">
+              <el-card shadow="hover" class="stat-card">
+                <el-statistic title="已生成技能" :value="evolutionStats.skills_count" />
+              </el-card>
+            </el-col>
+            <el-col :span="8">
+              <el-card shadow="hover" class="stat-card">
+                <el-statistic title="知识库总量" :value="evolutionStats.knowledge_base_size" />
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <el-card class="mt-20" v-if="evolutionSummary">
+            <template #header><span>进化概要</span></template>
+            <pre class="evolution-summary">{{ evolutionSummary }}</pre>
+          </el-card>
+
+          <el-card class="mt-20" v-if="evolutionStats.recent_learnings && evolutionStats.recent_learnings.length">
+            <template #header><span>最近学习记录</span></template>
+            <el-timeline>
+              <el-timeline-item
+                v-for="(item, i) in evolutionStats.recent_learnings"
+                :key="i"
+                :timestamp="item.time ? item.time.slice(0, 16) : ''"
+                placement="top"
+              >
+                <el-card shadow="hover">
+                  <div><strong>智能体:</strong> {{ item.agent }}</div>
+                  <div><strong>任务:</strong> {{ item.task }}</div>
+                  <div><strong>学到的知识:</strong> {{ item.knowledge }}</div>
+                  <div v-if="item.skill"><strong>技能:</strong> {{ item.skill }}</div>
+                  <div>
+                    <el-tag v-for="t in (item.tags || [])" :key="t" size="small" class="mr-4">{{ t }}</el-tag>
+                  </div>
+                </el-card>
+              </el-timeline-item>
+            </el-timeline>
+          </el-card>
+        </div>
+
+      </el-main>
+    </el-container>
+  </el-container>
+</div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://unpkg.com/element-plus"></script>
+<script src="https://unpkg.com/@element-plus/icons-vue"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
