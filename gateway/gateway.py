@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 """
-HTTP Agent Gateway v1.0
-Hermes 与 Trae 之间的通信桥梁
+Agent Gateway v1.0 — Hermes ↔ AI 通信桥梁
 
-职责：
-1. 接收 Hermes 的执行上下文（日志、diff、文件内容）
-2. 调用 deepseek-v4-pro 思考模式进行分析
-3. 返回结构化结果（answer、patch、review、commands、next_step）
-4. 记录所有交互供溯源
+GitHub 管代码，Hermes 管执行，Gateway 管调用，AI 管分析与生成。
 
-API 端口：8001
+单接口设计：POST /agent/run
+认证：Bearer Token
+日志：每次请求完整记录
 """
-import os, sys, json, re, time, hashlib, asyncio
+import os, sys, json, re, time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
 import uvicorn
 
-# ─── 配置 ───────
-GATEWAY_DIR = Path("/home/admin/hermes-platform/gateway")
-GATEWAY_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR = GATEWAY_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# ═══════════════════════════════════════
+# 配置
+# ═══════════════════════════════════════
 
-# 从 auth.json 获取 API key
+GATEWAY_DIR = Path("/home/admin/hermes-platform/gateway")
+LOG_DIR = GATEWAY_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Token — 第一版写死在环境变量，后续可升级
+GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "hermes-trae-gateway-v1")
+
+# DeepSeek API
 def get_deepseek_key():
     try:
-        import json
         d = json.load(open("/home/admin/.hermes/auth.json"))
         for cred in d.get('credential_pool', {}).get('deepseek', []):
             return cred['access_token']
@@ -41,70 +42,76 @@ def get_deepseek_key():
 DEEPSEEK_API_KEY = get_deepseek_key()
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
-# ─── 数据结构 ───────
+# ═══════════════════════════════════════
+# 数据模型（按 Trae 方案设计）
+# ═══════════════════════════════════════
 
-class GatewayRequest(BaseModel):
-    """网关请求"""
-    task_type: str = "analyze"  # analyze | code | review | debug | plan
-    context: Dict[str, Any] = {}  # 上下文：日志、diff、文件内容
-    files: Optional[List[Dict]] = None  # 相关文件
-    history: Optional[List[Dict]] = None  # 历史交互
+class AgentRunRequest(BaseModel):
+    """POST /agent/run 请求体"""
+    task: str = Field(..., description="任务描述，如：修复这个bug、添加登录功能")
+    context: Dict[str, Any] = Field(default_factory=dict, description="上下文")
+    files: Optional[List[Dict]] = Field(None, description="相关文件，每项包含 path 和 content")
+    constraints: Optional[List[str]] = Field(None, description="约束条件，如：不要改数据库结构")
+    history: Optional[List[Dict]] = Field(None, description="历史消息")
 
-class GatewayResponse(BaseModel):
-    """网关结构化响应"""
-    type: str  # answer | patch | review | commands | next_step | error
-    content: str  # 主要内容
-    structured: Optional[Dict] = None  # 结构化数据
-    suggested_actions: Optional[List[str]] = None  # 建议操作
-    confidence: float = 0.8
+class AgentRunResponse(BaseModel):
+    """POST /agent/run 响应体"""
+    summary: str = Field(..., description="概要说明")
+    analysis: str = Field("", description="详细分析")
+    patch: Optional[str] = Field(None, description="代码补丁（标准 diff 格式）")
+    commands: Optional[List[str]] = Field(None, description="建议执行的命令")
+    risks: Optional[List[str]] = Field(None, description="风险提示")
+    reasoning: Optional[str] = Field(None, description="AI 思考过程预览")
 
-# ─── 系统提示词 ───────
+# ═══════════════════════════════════════
+# 系统提示
+# ═══════════════════════════════════════
 
-SYSTEM_PROMPTS = {
-    "analyze": """你是一个 AI 架构师，负责分析问题和制定方案。
-请分析提供的上下文，给出：
-1. 问题分析
-2. 解决方案
-3. 建议的下一步
+AGENT_SYSTEM_PROMPT = """你是一个 AI 开发助手，与远程执行环境协作完成开发任务。
 
-返回 JSON 格式：
-{"type": "answer", "content": "分析结果", "structured": {"问题": "..", "方案": ".."}, "suggested_actions": ["动作1", "动作2"]}""",
+## 你的职责
+- 分析任务和上下文
+- 生成代码补丁
+- 提供审查意见
+- 建议下一步操作
 
-    "code": """你是一个资深程序员，负责编写代码。
-根据任务描述和上下文，生成代码。
-如果需要修改现有文件，返回 patch 格式。
-
-返回 JSON 格式：
-{"type": "patch", "content": "代码说明", "structured": {"file": "路径", "changes": "修改内容", "new_code": "新代码"}, "suggested_actions": ["动作1"]}""",
-
-    "review": """你是一个代码审查者，负责审查代码质量。
-检查：逻辑错误、性能问题、安全隐患、代码风格。
-
-返回 JSON 格式：
-{"type": "review", "content": "审查结论", "structured": {"issues": ["问题1"], "suggestions": ["建议1"], "rating": "A/B/C/D"}, "suggested_actions": ["动作1"]}""",
-
-    "debug": """你是一个调试专家，负责分析错误和异常。
-分析错误日志、堆栈跟踪，找出根本原因。
-
-返回 JSON 格式：
-{"type": "answer", "content": "调试分析", "structured": {"root_cause": "根本原因", "fix": "修复方案"}, "suggested_actions": ["动作1"]}""",
-
-    "plan": """你是一个项目经理，负责制定开发计划。
-根据需求拆解任务，排定优先级，估算工作量。
-
-返回 JSON 格式：
-{"type": "next_step", "content": "计划概述", "structured": {"tasks": [{"name": "任务", "priority": "高/中/低", "estimate": "预估时间"}], "timeline": "时间线"}, "suggested_actions": ["动作1"]}"""
+## 输出格式要求
+你必须返回严格的 JSON 格式，不要包含其他内容：
+{
+  "summary": "一句话概括你做了什么",
+  "analysis": "详细分析过程",
+  "patch": "代码补丁（diff格式），如果没有修改则留空",
+  "commands": ["建议执行的shell命令"],
+  "risks": ["风险提示"]
 }
 
-# ─── FastAPI ───────
+## 注意事项
+- patch 使用标准的 unified diff 格式
+- 如果没有代码修改，patch 设为空字符串
+- commands 列出建议 Hermes 执行的验证命令
+- risks 列出可能的副作用"""
 
-app = FastAPI(title="HTTP Agent Gateway", version="1.0",
-              description="Hermes ↔ Trae 通信网关")
+# ═══════════════════════════════════════
+# FastAPI
+# ═══════════════════════════════════════
+
+app = FastAPI(title="Agent Gateway", version="1.0",
+              description="Hermes ↔ AI 通信桥梁")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
-def call_llm(messages, max_tokens=8192):
-    """调用 deepseek-v4-pro"""
+security = HTTPBearer(auto_error=False)
+
+def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+    """Bearer Token 鉴权"""
+    if not credentials:
+        raise HTTPException(401, "缺少 Authorization: Bearer <token>")
+    if credentials.credentials != GATEWAY_TOKEN:
+        raise HTTPException(403, "Token 无效")
+    return credentials
+
+def call_llm(messages: List[Dict]) -> tuple:
+    """调用 deepseek-v4-pro 思考模式"""
     from openai import OpenAI
     client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
     try:
@@ -112,188 +119,135 @@ def call_llm(messages, max_tokens=8192):
             model="deepseek-v4-pro",
             messages=messages,
             temperature=0.3,
-            max_tokens=max_tokens,
+            max_tokens=8192,
             reasoning_effort="high"
         )
         content = resp.choices[0].message.content
-        
-        # 提取思考过程
         rc = getattr(resp.choices[0].message, 'reasoning_content', None) or ""
         return content, rc
     except Exception as e:
-        return f'{{"type":"error","content":"调用失败: {e}","structured":{{}},"suggested_actions":[]}}', ""
+        error_json = json.dumps({
+            "summary": f"AI 调用失败: {str(e)}",
+            "analysis": "",
+            "patch": "",
+            "commands": [],
+            "risks": ["AI 服务暂时不可用"]
+        })
+        return error_json, ""
 
-def parse_response(text):
+def parse_agent_response(text: str) -> dict:
     """解析 AI 返回的 JSON"""
-    # 尝试从 ```json 块中提取
+    # 优先从 ```json 块提取
     m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
     if m:
         try: return json.loads(m.group(1))
         except: pass
     
-    # 尝试全文解析
+    # 尝试全文 JSON
     start, end = text.find('{'), text.rfind('}')
     if start != -1 and end != -1:
         try:
             data = json.loads(text[start:end+1])
-            if "type" in data:
+            if "summary" in data:
                 return data
         except: pass
     
     # 兜底
-    return {"type": "answer", "content": text[:1000], "structured": {}, "suggested_actions": []}
+    return {
+        "summary": text[:500],
+        "analysis": "",
+        "patch": "",
+        "commands": [],
+        "risks": []
+    }
+
+def log_request(task: str, resp: dict, duration: float):
+    """记录审计日志"""
+    entry = {
+        "time": datetime.now().isoformat(),
+        "task_preview": task[:100],
+        "duration_sec": round(duration, 2),
+        "has_patch": bool(resp.get("patch")),
+        "commands_count": len(resp.get("commands", [])),
+        "summary_preview": resp.get("summary", "")[:100]
+    }
+    log_file = LOG_DIR / f"{datetime.now().strftime('%Y%m%d')}.jsonl"
+    with open(log_file, "a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 # ═══════════════════════════════════════
-# API
+# API — 核心单接口
 # ═══════════════════════════════════════
 
 @app.get("/")
 async def root():
     return {
-        "service": "HTTP Agent Gateway",
+        "service": "Agent Gateway",
         "version": "1.0",
         "status": "running",
-        "model": "deepseek-v4-pro (reasoning)",
-        "task_types": list(SYSTEM_PROMPTS.keys())
+        "model": "deepseek-v4-pro (reasoning)"
     }
 
-@app.post("/v1/chat")
-async def chat_gateway(req: GatewayRequest):
-    """统一的网关入口"""
-    
-    task_type = req.task_type
-    context = req.context
-    files = req.files or []
-    history = req.history or []
+@app.post("/agent/run", response_model=AgentRunResponse)
+async def agent_run(req: AgentRunRequest, auth=Depends(verify_token)):
+    """核心接口：Hermes 调用 AI 完成任务"""
+    start_time = time.time()
     
     # 构建上下文
-    context_str = f"## 任务类型：{task_type}\n\n"
+    context_parts = [f"## 任务\n{req.task}\n"]
     
-    if context:
-        context_str += "## 上下文\n"
-        for key, value in context.items():
-            if isinstance(value, str) and len(value) > 2000:
-                context_str += f"### {key}\n```\n{value[:2000]}...\n```\n"
-            else:
-                context_str += f"### {key}\n```\n{value}\n```\n"
+    if req.context:
+        context_parts.append("## 上下文")
+        for key, value in req.context.items():
+            val_str = str(value)
+            if len(val_str) > 3000:
+                val_str = val_str[:3000] + "..."
+            context_parts.append(f"### {key}\n```\n{val_str}\n```")
     
-    if files:
-        context_str += "\n## 相关文件\n"
-        for f in files:
-            content = f.get("content", "")[:2000]
-            context_str += f"### {f.get('path', 'unknown')}\n```\n{content}\n```\n"
+    if req.files:
+        context_parts.append(f"\n## 相关文件（{len(req.files)}个）")
+        for f in req.files[:10]:  # 最多10个
+            content = f.get("content", "")
+            if len(content) > 2000:
+                content = content[:2000] + "\n...（截断）"
+            context_parts.append(f"### {f.get('path', 'unknown')}\n```\n{content}\n```")
     
-    # 系统提示
-    system_prompt = SYSTEM_PROMPTS.get(task_type, SYSTEM_PROMPTS["analyze"])
+    if req.constraints:
+        context_parts.append("\n## 约束条件\n" + "\n".join(f"- {c}" for c in req.constraints))
     
-    messages = [
-        {"role": "system", "content": f"{system_prompt}\n\n使用 deepseek-v4-pro 思考模式，返回结构化 JSON。"},
-    ]
+    context_str = "\n".join(context_parts)
     
-    # 历史
-    for h in history[-5:]:
-        messages.append(h)
+    # 构建消息
+    messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+    
+    if req.history:
+        for h in req.history[-5:]:
+            messages.append(h)
     
     messages.append({"role": "user", "content": context_str})
     
-    # 调用模型
+    # 调用 AI
     response, reasoning = call_llm(messages)
+    parsed = parse_agent_response(response)
     
-    # 解析结果
-    parsed = parse_response(response)
-    
-    # 记录日志
-    log_entry = {
-        "time": datetime.now().isoformat(),
-        "task_type": task_type,
-        "context_keys": list(context.keys()),
-        "response_type": parsed.get("type", "unknown"),
-        "response_preview": parsed.get("content", "")[:200],
-    }
-    
-    log_file = LOG_DIR / f"{datetime.now().strftime('%Y%m%d')}.jsonl"
-    with open(log_file, "a") as f:
-        f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    # 日志
+    duration = time.time() - start_time
+    log_request(req.task, parsed, duration)
     
     return {
-        "type": parsed.get("type", "answer"),
-        "content": parsed.get("content", response[:1000]),
-        "structured": parsed.get("structured", {}),
-        "suggested_actions": parsed.get("suggested_actions", []),
-        "confidence": parsed.get("confidence", 0.8),
-        "reasoning_preview": reasoning[:500] if reasoning else ""
-    }
-
-@app.post("/v1/analyze")
-async def analyze(req: Request):
-    """快捷接口：分析问题"""
-    body = await req.json()
-    return await chat_gateway(GatewayRequest(
-        task_type="analyze",
-        context=body.get("context", {}),
-        files=body.get("files"),
-        history=body.get("history")
-    ))
-
-@app.post("/v1/review")
-async def review(req: Request):
-    """快捷接口：审查代码"""
-    body = await req.json()
-    return await chat_gateway(GatewayRequest(
-        task_type="review",
-        context=body.get("context", {}),
-        files=body.get("files"),
-        history=body.get("history")
-    ))
-
-@app.get("/v1/logs")
-async def get_logs(date: str = None):
-    """查看网关调用日志"""
-    if date:
-        log_file = LOG_DIR / f"{date}.jsonl"
-    else:
-        # 最新的
-        logs = sorted(LOG_DIR.glob("*.jsonl"), reverse=True)
-        log_file = logs[0] if logs else None
-    
-    if not log_file or not log_file.exists():
-        return {"logs": [], "count": 0}
-    
-    logs = []
-    with open(log_file) as f:
-        for line in f:
-            if line.strip():
-                logs.append(json.loads(line))
-    
-    return {"logs": logs[-20:], "count": len(logs), "file": log_file.name}
-
-@app.get("/v1/stats")
-async def get_stats():
-    """网关统计"""
-    total = 0
-    by_type = {}
-    today = datetime.now().strftime('%Y%m%d')
-    
-    for log_file in LOG_DIR.glob("*.jsonl"):
-        with open(log_file) as f:
-            for line in f:
-                if line.strip():
-                    total += 1
-                    entry = json.loads(line)
-                    t = entry.get("response_type", "unknown")
-                    by_type[t] = by_type.get(t, 0) + 1
-    
-    return {
-        "total_calls": total,
-        "by_type": by_type,
-        "today": today,
-        "model": "deepseek-v4-pro"
+        "summary": parsed.get("summary", ""),
+        "analysis": parsed.get("analysis", ""),
+        "patch": parsed.get("patch"),
+        "commands": parsed.get("commands", []),
+        "risks": parsed.get("risks", []),
+        "reasoning": reasoning[:800] if reasoning else ""
     }
 
 # ═══════════════════════════════════════
 if __name__ == "__main__":
-    print(f"🚀 HTTP Agent Gateway v1.0")
+    print(f"🚀 Agent Gateway v1.0")
     print(f"📡 端口: 8001")
+    print(f"🔑 Token: {GATEWAY_TOKEN}")
     print(f"🧠 模型: deepseek-v4-pro (思考模式)")
-    print(f"📋 任务类型: {', '.join(SYSTEM_PROMPTS.keys())}")
+    print(f"📋 接口: POST /agent/run")
     uvicorn.run(app, host="0.0.0.0", port=8001)
