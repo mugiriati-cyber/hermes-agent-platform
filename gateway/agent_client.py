@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8001")
-GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "hermes-trae-gateway-v1")
+GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN")
+if not GATEWAY_TOKEN:
+    print("FATAL: GATEWAY_TOKEN 环境变量未设置", file=sys.stderr)
+    sys.exit(1)
 
 def read_file(path: str, max_len: int = 3000) -> str:
     """读取文件，自动截断"""
